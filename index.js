@@ -5,52 +5,120 @@
  * This is the main entrypoint to your Probot app
  * @param {import('probot').Probot} app
  */
+
+const { AdminAPI } = require("./src/ghost-api");
+const { apiRequest } = require("./src/api");
+const REGEX_POST_ID = /\/editor\/post\/(?<postId>\w+)/gm;
+const FILE_STATUS = {
+  Added: "added",
+  Removed: "removed",
+  Modified: "modified",
+};
+
+const USER_TYPE = {
+  Bot: "Bot",
+  User: "User",
+};
+
 module.exports = (app) => {
-  // Your code here
   app.log.info("Yay, the app was loaded!");
-  app.on(
-    ["pull_request.opened", "pull_request.synchronize"],
-    async (context) => {
-      // Creates a deployment on a pull request event
-      // Then sets the deployment status to success
-      // NOTE: this example doesn't actually integrate with a cloud
-      // provider to deploy your app, it just demos the basic API usage.
-      app.log.info(context.payload);
+  app.on(["pull_request.opened"], async (context) => {
+    const pr = context.payload.pull_request;
+    const user = pr.user.login;
 
-      // Probot API note: context.repo() => { username: 'hiimbex', repo: 'testing-things' }
-      const res = await context.octokit.repos.createDeployment(
-        context.repo({
-          ref: context.payload.pull_request.head.ref, // The ref to deploy. This can be a branch, tag, or SHA.
-          task: "deploy", // Specifies a task to execute (e.g., deploy or deploy:migrations).
-          auto_merge: true, // Attempts to automatically merge the default branch into the requested ref, if it is behind the default branch.
-          required_contexts: [], // The status contexts to verify against commit status checks. If this parameter is omitted, then all unique contexts will be verified before a deployment is created. To bypass checking entirely pass an empty array. Defaults to all unique contexts.
-          payload: {
-            schema: "rocks!",
-          }, // JSON payload with extra information about the deployment. Default: ""
-          environment: "production", // Name for the target deployment environment (e.g., production, staging, qa)
-          description: "My Probot App's first deploy!", // Short description of the deployment
-          transient_environment: false, // Specifies if the given environment is specific to the deployment and will no longer exist at some point in the future.
-          production_environment: true, // Specifies if the given environment is one that end-users directly interact with.
-        })
-      );
+    const prFiles = await apiRequest(`pulls/${pr.number}/files`);
 
-      const deploymentId = res.data.id;
-      await context.octokit.repos.createDeploymentStatus(
-        context.repo({
-          deployment_id: deploymentId,
-          state: "success", // The state of the status. Can be one of error, failure, inactive, pending, or success
-          log_url: "https://example.com", // The log URL to associate with this status. This URL should contain output to keep the user updated while the task is running or serve as historical information for what happened in the deployment.
-          description: "My Probot App set a deployment status!", // A short description of the status.
-          environment_url: "https://example.com", // Sets the URL for accessing your environment.
-          auto_inactive: true, // Adds a new inactive status to all prior non-transient, non-production environment deployments with the same repository and environment name as the created status's deployment. An inactive status is only added to deployments that had a success state.
-        })
-      );
+    const mdFile = prFiles.filter(
+      (file) =>
+        file.status === FILE_STATUS.Added &&
+        file.filename.toLowerCase().includes(".md")
+    );
+
+    if (!mdFile || !mdFile[0]) {
+      return;
     }
-  );
 
-  // For more information on building apps:
-  // https://probot.github.io/docs/
+    const rawFile = await apiRequest(mdFile[0].raw_url);
 
-  // To get your app running against GitHub, see:
-  // https://probot.github.io/docs/development/
+    const mobiledoc = JSON.stringify({
+      version: "0.3.1",
+      markups: [],
+      atoms: [],
+      cards: [["markdown", { cardName: "markdown", markdown: rawFile }]],
+      sections: [[10, 0]],
+    });
+
+    const post = await AdminAPI.posts.add({
+      title: pr.title,
+      mobiledoc,
+    });
+
+    app.log.info({ post });
+
+    const baseURL = new URL(post.url).origin;
+
+    const msg = context.issue({
+      body: `Hey @${user} 👋, thanks for your contribution.
+
+This pull request is being automatically in sync with ghost previews!
+
+🔍 Post: [${baseURL}/ghost/#/editor/post/${post.id}](${baseURL}/ghost/#/editor/post/${post.id})  
+✅ Post Preview: [${post.url}](${post.url})
+`,
+    });
+
+    await context.octokit.issues.createComment(msg);
+  });
+
+  app.on(["pull_request.synchronize"], async (context) => {
+    const pr = context.payload.pull_request;
+    const user = pr.user.login;
+
+    const prFiles = await apiRequest(`pulls/${pr.number}/files`);
+    const comments = await apiRequest(`issues/${pr.number}/comments`);
+
+    const mdFile = prFiles.filter(
+      (file) =>
+        file.status === FILE_STATUS.Added &&
+        file.filename.toLowerCase().includes(".md")
+    );
+
+    const previewComment = comments.find(
+      (comment) =>
+        comment.user.type === USER_TYPE.Bot && comment.body.includes("Post: ")
+    );
+
+    if (!mdFile || !mdFile[0] || !previewComment) {
+      return;
+    }
+
+    const rawFile = await apiRequest(mdFile[0].raw_url);
+
+    const mobiledoc = JSON.stringify({
+      version: "0.3.1",
+      markups: [],
+      atoms: [],
+      cards: [["markdown", { cardName: "markdown", markdown: rawFile }]],
+      sections: [[10, 0]],
+    });
+
+    app.log.info({ rawFile, title: pr.title, mobiledoc });
+
+    const match = REGEX_POST_ID.exec(previewComment.body).groups;
+
+    const currentPost = await AdminAPI.posts.read({
+      id: match.postId,
+    });
+
+    app.log.info({ currentPost });
+
+    const editedPost = await AdminAPI.posts.edit({
+      id: match.postId,
+      title: pr.title,
+      updated_at: currentPost.updated_at,
+      mobiledoc,
+    });
+
+    app.log.info({ editedPost });
+  });
 };

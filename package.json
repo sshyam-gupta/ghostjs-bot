@@ -16,6 +16,9 @@
     "test": "jest"
   },
   "dependencies": {
+    "@tryghost/admin-api": "^1.4.3",
+    "@tryghost/content-api": "^1.5.13",
+    "axios": "^0.24.0",
     "probot": "^11.0.1"
   },
   "devDependencies": {
